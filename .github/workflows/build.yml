@@ -1,0 +1,1450 @@
+# =====================================================================
+#  CHARCOAL UI - Fabric 1.21.11 (client mod)
+#  Taruh file ini di:  .github/workflows/build.yml  (di repo GitHub kosong)
+#  Lalu: tab Actions -> "Build Charcoal UI" -> Run workflow -> download artifact (.jar)
+#  Seluruh source code mod ditulis oleh workflow ini (step "Generate ...").
+# =====================================================================
+name: Build Charcoal UI
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [main, master]
+
+env:
+  # Kalau Gradle bilang versi tidak ada, ganti di sini saja.
+  MC_VERSION: "1.21.11"
+  YARN: "1.21.11+build.3"
+  LOADER: "0.18.2"
+  FABRIC_API: "0.140.0+1.21.11"
+  LOOM: "1.14-SNAPSHOT"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: 21
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "9.2.1"
+
+      # ---------------------------------------------------------------
+      - name: Generate Gradle config + metadata
+        run: |
+          mkdir -p src/main/java/com/charcoalui/mixin src/main/resources
+          cat > gradle.properties <<EOF
+          org.gradle.jvmargs=-Xmx2G
+          minecraft_version=$MC_VERSION
+          yarn_mappings=$YARN
+          loader_version=$LOADER
+          fabric_version=$FABRIC_API
+          loom_version=$LOOM
+          EOF
+          sed -i 's/^ *//' gradle.properties
+
+          cat > settings.gradle <<'EOF'
+          pluginManagement {
+              repositories {
+                  maven { name = 'Fabric'; url = 'https://maven.fabricmc.net/' }
+                  mavenCentral()
+                  gradlePluginPortal()
+              }
+          }
+          rootProject.name = 'charcoalui'
+          EOF
+
+          cat > build.gradle <<'EOF'
+          plugins { id 'fabric-loom' version "${loom_version}" }
+          version = '1.0.0'
+          group = 'com.charcoalui'
+          base { archivesName = 'charcoalui' }
+          repositories { mavenCentral() }
+          dependencies {
+              minecraft "com.mojang:minecraft:${project.minecraft_version}"
+              mappings "net.fabricmc:yarn:${project.yarn_mappings}:v2"
+              modImplementation "net.fabricmc:fabric-loader:${project.loader_version}"
+              modImplementation "net.fabricmc.fabric-api:fabric-api:${project.fabric_version}"
+              implementation 'javazoom:jlayer:1.0.1'
+              include 'javazoom:jlayer:1.0.1'
+          }
+          processResources {
+              inputs.property 'version', project.version
+              filesMatching('fabric.mod.json') { expand 'version': project.version }
+          }
+          tasks.withType(JavaCompile).configureEach { options.release = 21 }
+          java { withSourcesJar() }
+          EOF
+
+          cat > src/main/resources/fabric.mod.json <<'EOF'
+          {
+            "schemaVersion": 1,
+            "id": "charcoalui",
+            "version": "${version}",
+            "name": "Charcoal UI",
+            "description": "Menu ala Essential, skin, cape, cosmetic, account switcher, gallery, music player.",
+            "environment": "client",
+            "entrypoints": { "client": ["com.charcoalui.CharcoalUI"] },
+            "mixins": ["charcoalui.mixins.json"],
+            "depends": { "fabricloader": ">=0.18.0", "minecraft": "~1.21.11", "java": ">=21", "fabric-api": "*" }
+          }
+          EOF
+
+          cat > src/main/resources/charcoalui.mixins.json <<'EOF'
+          {
+            "required": true,
+            "package": "com.charcoalui.mixin",
+            "compatibilityLevel": "JAVA_21",
+            "client": ["SessionAccessor"],
+            "injectors": { "defaultRequire": 1 }
+          }
+          EOF
+
+          cat > src/main/java/com/charcoalui/mixin/SessionAccessor.java <<'EOF'
+          package com.charcoalui.mixin;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.session.Session;
+          import org.spongepowered.asm.mixin.Mixin;
+          import org.spongepowered.asm.mixin.Mutable;
+          import org.spongepowered.asm.mixin.gen.Accessor;
+          @Mixin(MinecraftClient.class)
+          public interface SessionAccessor {
+              @Accessor("session") @Mutable void charcoal$setSession(Session session);
+          }
+          EOF
+
+      # ---------------------------------------------------------------
+      - name: Generate core (entry, theme, assets, accounts, widgets)
+        run: |
+          D=src/main/java/com/charcoalui
+
+          cat > $D/CharcoalUI.java <<'EOF'
+          package com.charcoalui;
+          import net.fabricmc.api.ClientModInitializer;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientLifecycleEvents;
+          import net.fabricmc.fabric.api.client.event.lifecycle.v1.ClientTickEvents;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.screen.TitleScreen;
+          import net.minecraft.client.gui.screen.GameMenuScreen;
+
+          public class CharcoalUI implements ClientModInitializer {
+              public static boolean allowVanilla = false;
+              @Override public void onInitializeClient() {
+                  System.setProperty("java.awt.headless", "true");
+                  Assets.init();
+                  Accounts.load();
+                  ClientLifecycleEvents.CLIENT_STARTED.register(c -> Accounts.applyCurrent());
+                  ClientTickEvents.END_CLIENT_TICK.register(c -> {
+                      Screen s = c.currentScreen;
+                      if (s instanceof TitleScreen) c.setScreen(new MenuScreen(false));
+                      else if (s instanceof GameMenuScreen && !allowVanilla && c.world != null) c.setScreen(new MenuScreen(true));
+                      if (!(s instanceof GameMenuScreen)) allowVanilla = false;
+                  });
+              }
+          }
+          EOF
+
+          cat > $D/Theme.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          public final class Theme {
+              public static final int BG = 0xFF2B2B2D, PANEL = 0xFF343437, PANEL_LIGHT = 0xFF3F3F44;
+              public static final int BLUE = 0xFF4169E1, BLUE_HOVER = 0xFF5B7FEA, DANGER = 0xFFC0392B;
+              public static final int TEXT = 0xFFEDEDED, MUTED = 0xFF9A9AA0;
+              public static void bg(DrawContext c, int w, int h) { c.fill(0, 0, w, h, BG); }
+              public static void round(DrawContext c, int x, int y, int w, int h, int col) {
+                  c.fill(x + 2, y, x + w - 2, y + h, col);
+                  c.fill(x + 1, y + 1, x + w - 1, y + h - 1, col);
+                  c.fill(x, y + 2, x + w, y + h - 2, col);
+              }
+              public static void panel(DrawContext c, int x, int y, int w, int h) { round(c, x, y, w, h, PANEL); }
+              public static void text(DrawContext c, String s, int x, int y, int col) {
+                  c.drawText(MinecraftClient.getInstance().textRenderer, s, x, y, col, false);
+              }
+              public static void center(DrawContext c, String s, int cx, int y, int col) {
+                  int w = MinecraftClient.getInstance().textRenderer.getWidth(s);
+                  text(c, s, cx - w / 2, y, col);
+              }
+          }
+          EOF
+
+          cat > $D/RoyalButton.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+          public class RoyalButton extends ButtonWidget {
+              public static final int ROYAL = 0, ROW = 1, DANGER = 2, GALLERY = 3;
+              private int style; private boolean selected, left;
+              public RoyalButton(int x, int y, int w, int h, String label, PressAction a) {
+                  super(x, y, w, h, Text.literal(label), a, DEFAULT_NARRATION_SUPPLIER);
+              }
+              public RoyalButton style(int s) { style = s; return this; }
+              public RoyalButton select(boolean s) { selected = s; return this; }
+              public RoyalButton left(boolean l) { left = l; return this; }
+              @Override public void renderWidget(DrawContext c, int mx, int my, float d) {
+                  boolean hv = isHovered();
+                  int bg;
+                  if (style == ROW) bg = selected ? 0xFF3A4A7A : (hv ? 0xFF404046 : 0x00000000);
+                  else if (style == DANGER) bg = hv ? 0xFFD64B3B : Theme.DANGER;
+                  else bg = !active ? 0xFF55596A : (hv ? Theme.BLUE_HOVER : Theme.BLUE);
+                  int x = getX(), y = getY(), w = getWidth(), h = getHeight();
+                  Theme.round(c, x, y, w, h, bg);
+                  if (style == GALLERY) {
+                      int W = 0xFFFFFFFF;
+                      c.fill(x + 5, y + 6, x + w - 5, y + h - 6, W);
+                      c.fill(x + 6, y + 7, x + w - 6, y + h - 7, bg);
+                      c.fill(x + w - 10, y + 8, x + w - 8, y + 10, W);
+                      c.fill(x + 7, y + h - 9, x + 14, y + h - 7, W);
+                      c.fill(x + 9, y + h - 11, x + 12, y + h - 9, W);
+                      return;
+                  }
+                  TextRenderer tr = MinecraftClient.getInstance().textRenderer;
+                  String s = getMessage().getString();
+                  int ty = y + (h - 8) / 2;
+                  int col = (style == ROW && !selected) ? 0xFFD0D0D6 : 0xFFFFFFFF;
+                  if (left) c.drawText(tr, s, x + 6, ty, col, false);
+                  else c.drawText(tr, s, x + (w - tr.getWidth(s)) / 2, ty, col, false);
+              }
+          }
+          EOF
+
+          cat > $D/RoyalSlider.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.widget.SliderWidget;
+          import net.minecraft.text.Text;
+          import java.util.function.DoubleConsumer;
+          public class RoyalSlider extends SliderWidget {
+              private final String label; private final DoubleConsumer cb;
+              public RoyalSlider(int x, int y, int w, int h, String label, double v, DoubleConsumer cb) {
+                  super(x, y, w, h, Text.literal(""), v);
+                  this.label = label; this.cb = cb; updateMessage();
+              }
+              @Override protected void updateMessage() {
+                  if (label != null) setMessage(Text.literal(label + " " + (int) Math.round(value * 100) + "%"));
+              }
+              @Override protected void applyValue() { if (cb != null) cb.accept(value); }
+              @Override public void renderWidget(DrawContext c, int mx, int my, float d) {
+                  int x = getX(), y = getY(), w = getWidth(), h = getHeight();
+                  c.fill(x, y, x + w, y + h, 0xFF1F1F22);
+                  c.fill(x, y, x + (int) (w * value), y + h, isHovered() ? Theme.BLUE_HOVER : Theme.BLUE);
+                  Theme.center(c, getMessage().getString(), x + w / 2, y + (h - 8) / 2, 0xFFFFFFFF);
+              }
+          }
+          EOF
+
+          cat > $D/Assets.java <<'EOF'
+          package com.charcoalui;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.texture.NativeImage;
+          import net.minecraft.client.texture.NativeImageBackedTexture;
+          import net.minecraft.util.Identifier;
+          import javax.imageio.ImageIO;
+          import java.awt.image.BufferedImage;
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.*;
+          import java.util.stream.*;
+          public final class Assets {
+              public record Tex(Identifier id, int w, int h) {}
+              private static final Map<String, Tex> CACHE = new HashMap<>();
+              private static final Set<String> FAIL = new HashSet<>();
+              private static int counter = 0;
+              public static Path root() { return FabricLoader.getInstance().getGameDir().resolve("charcoalui"); }
+              public static Path dir(String n) {
+                  Path p = root().resolve(n);
+                  try { Files.createDirectories(p); } catch (IOException ignored) {}
+                  return p;
+              }
+              public static void init() { for (String s : new String[]{"skins", "capes", "cosmetics", "music"}) dir(s); }
+              public static List<Path> list(Path dir, String... ext) {
+                  try (Stream<Path> s = Files.list(dir)) {
+                      return s.filter(Files::isRegularFile).filter(p -> {
+                          String n = p.getFileName().toString().toLowerCase();
+                          for (String e : ext) if (n.endsWith(e)) return true;
+                          return false;
+                      }).sorted(Comparator.comparing(p -> p.getFileName().toString().toLowerCase()))
+                        .collect(Collectors.toCollection(ArrayList::new));
+                  } catch (IOException e) { return new ArrayList<>(); }
+              }
+              public static Tex texture(Path p) {
+                  String key = p + "#" + p.toFile().lastModified();
+                  Tex t = CACHE.get(key);
+                  if (t != null) return t;
+                  if (FAIL.contains(key)) return null;
+                  try (InputStream in = Files.newInputStream(p)) {
+                      t = register(NativeImage.read(in));
+                      CACHE.put(key, t);
+                      return t;
+                  } catch (Exception e) { FAIL.add(key); return null; }
+              }
+              public static Tex register(NativeImage img) {
+                  int w = img.getWidth(), h = img.getHeight();
+                  Identifier id = Identifier.of("charcoalui", "tex/" + (counter++));
+                  MinecraftClient.getInstance().getTextureManager()
+                      .registerTexture(id, new NativeImageBackedTexture(() -> id.toString(), img));
+                  return new Tex(id, w, h);
+              }
+              public static Tex fromBuffered(BufferedImage b) throws IOException {
+                  ByteArrayOutputStream o = new ByteArrayOutputStream();
+                  ImageIO.write(b, "png", o);
+                  return register(NativeImage.read(new ByteArrayInputStream(o.toByteArray())));
+              }
+              public static void destroy(Tex t) {
+                  if (t != null) MinecraftClient.getInstance().getTextureManager().destroyTexture(t.id());
+              }
+          }
+          EOF
+
+          cat > $D/Selection.java <<'EOF'
+          package com.charcoalui;
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.Properties;
+          public final class Selection {
+              private static final Properties P = new Properties();
+              private static Path file() { return Assets.root().resolve("selection.properties"); }
+              static {
+                  try (InputStream in = Files.newInputStream(file())) { P.load(in); } catch (Exception ignored) {}
+              }
+              public static void set(String k, String v) {
+                  if (v == null) P.remove(k); else P.setProperty(k, v);
+                  try (OutputStream o = Files.newOutputStream(file())) { P.store(o, "charcoalui"); } catch (Exception ignored) {}
+              }
+              public static Path path(String k, String dir) {
+                  String n = P.getProperty(k);
+                  if (n == null) return null;
+                  Path p = Assets.dir(dir).resolve(n);
+                  return Files.exists(p) ? p : null;
+              }
+          }
+          EOF
+
+          cat > $D/Accounts.java <<'EOF'
+          package com.charcoalui;
+          import com.charcoalui.mixin.SessionAccessor;
+          import com.google.gson.*;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.session.Session;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.*;
+          import java.util.*;
+          public final class Accounts {
+              public static final int MAX = 200;
+              public static final List<String> NAMES = new ArrayList<>();
+              public static String current;
+              private static Path file() { return Assets.root().resolve("accounts.json"); }
+              public static void load() {
+                  try {
+                      if (!Files.exists(file())) return;
+                      JsonObject o = JsonParser.parseString(Files.readString(file())).getAsJsonObject();
+                      for (JsonElement e : o.getAsJsonArray("accounts")) NAMES.add(e.getAsString());
+                      if (o.has("current")) current = o.get("current").getAsString();
+                  } catch (Exception ignored) {}
+              }
+              public static void save() {
+                  try {
+                      JsonObject o = new JsonObject();
+                      JsonArray a = new JsonArray();
+                      for (String n : NAMES) a.add(n);
+                      o.add("accounts", a);
+                      if (current != null) o.addProperty("current", current);
+                      Files.writeString(file(), new GsonBuilder().setPrettyPrinting().create().toJson(o));
+                  } catch (Exception ignored) {}
+              }
+              public static void applyCurrent() {
+                  String real = MinecraftClient.getInstance().getSession().getUsername();
+                  if (NAMES.isEmpty()) { NAMES.add(real); current = real; save(); }
+                  else if (current != null && NAMES.contains(current)) switchTo(current);
+                  else { current = real; if (!NAMES.contains(real) && NAMES.size() < MAX) NAMES.add(real); save(); }
+              }
+              public static UUID offlineUuid(String n) {
+                  return UUID.nameUUIDFromBytes(("OfflinePlayer:" + n).getBytes(StandardCharsets.UTF_8));
+              }
+              public static void switchTo(String n) {
+                  MinecraftClient c = MinecraftClient.getInstance();
+                  Session s = new Session(n, offlineUuid(n), "0", Optional.empty(), Optional.empty());
+                  ((SessionAccessor) (Object) c).charcoal$setSession(s);
+                  current = n; save();
+              }
+              private static String check(String n) {
+                  if (n == null || !n.matches("[A-Za-z0-9_]{3,16}")) return "Username: 3-16 karakter (huruf/angka/_)";
+                  for (String x : NAMES) if (x.equalsIgnoreCase(n)) return "Username sudah ada";
+                  return null;
+              }
+              public static String add(String n) {
+                  if (NAMES.size() >= MAX) return "Batas " + MAX + " akun tercapai";
+                  String e = check(n); if (e != null) return e;
+                  NAMES.add(n); save(); return null;
+              }
+              public static String rename(String old, String n) {
+                  int i = NAMES.indexOf(old);
+                  if (i < 0) return "Pilih akun dulu";
+                  String e = check(n); if (e != null) return e;
+                  NAMES.set(i, n);
+                  boolean wasCurrent = old.equals(current);
+                  save();
+                  if (wasCurrent) switchTo(n);
+                  return null;
+              }
+              public static void remove(String n) {
+                  NAMES.remove(n);
+                  if (n.equals(current)) {
+                      if (!NAMES.isEmpty()) switchTo(NAMES.get(0)); else { current = null; save(); }
+                  } else save();
+              }
+          }
+          EOF
+
+          cat > $D/BBModel.java <<'EOF'
+          package com.charcoalui;
+          import com.google.gson.*;
+          import net.minecraft.client.gui.DrawContext;
+          import java.io.Reader;
+          import java.nio.file.*;
+          import java.util.*;
+          public final class BBModel {
+              public String name = "";
+              public final List<float[]> cubes = new ArrayList<>();
+              public static BBModel load(Path p) {
+                  try (Reader r = Files.newBufferedReader(p)) {
+                      JsonObject o = JsonParser.parseReader(r).getAsJsonObject();
+                      BBModel m = new BBModel();
+                      m.name = o.has("name") ? o.get("name").getAsString() : p.getFileName().toString();
+                      if (o.has("elements")) for (JsonElement e : o.getAsJsonArray("elements")) {
+                          JsonObject c = e.getAsJsonObject();
+                          if (c.has("type") && !c.get("type").getAsString().equals("cube")) continue;
+                          if (!c.has("from") || !c.has("to")) continue;
+                          JsonArray f = c.getAsJsonArray("from"), t = c.getAsJsonArray("to");
+                          m.cubes.add(new float[]{f.get(0).getAsFloat(), f.get(1).getAsFloat(), f.get(2).getAsFloat(),
+                                                  t.get(0).getAsFloat(), t.get(1).getAsFloat(), t.get(2).getAsFloat()});
+                      }
+                      m.cubes.sort(Comparator.comparingDouble(a -> a[2]));
+                      return m;
+                  } catch (Exception ex) { return null; }
+              }
+              /** Proyeksi depan (flat). Render 3D di dunia belum termasuk. */
+              public void draw(DrawContext c, int cx, int bottom, float s) {
+                  int i = 0;
+                  for (float[] a : cubes) {
+                      int x1 = cx + Math.round(Math.min(a[0], a[3]) * s), x2 = cx + Math.round(Math.max(a[0], a[3]) * s);
+                      int y1 = bottom - Math.round(Math.max(a[1], a[4]) * s), y2 = bottom - Math.round(Math.min(a[1], a[4]) * s);
+                      int sh = 120 + (i * 37) % 100;
+                      c.fill(x1, y1, x2, y2, 0xFF000000 | (sh / 2 << 16) | (sh * 2 / 3 << 8) | Math.min(255, sh + 60));
+                      c.fill(x1, y1, x2, y1 + 1, 0x55FFFFFF);
+                      i++;
+                  }
+              }
+          }
+          EOF
+
+          cat > $D/Preview.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.gl.RenderPipelines;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.util.Identifier;
+          public final class Preview {
+              public static Assets.Tex steve() {
+                  return new Assets.Tex(Identifier.ofVanilla("textures/entity/player/wide/steve.png"), 64, 64);
+              }
+              public static Assets.Tex currentSkin() {
+                  java.nio.file.Path p = Selection.path("skin", "skins");
+                  Assets.Tex t = p == null ? null : Assets.texture(p);
+                  return t != null ? t : steve();
+              }
+              private static void part(DrawContext c, Assets.Tex t, int x, int y, int u, int v, int w, int h, int s) {
+                  float f = t.w() / 64f;
+                  c.drawTexture(RenderPipelines.GUI_TEXTURED, t.id(), x, y, u * f, v * f, w * s, h * s,
+                          (int) (w * f), (int) (h * f), t.w(), t.h());
+              }
+              /** Tampak depan skin (2D). */
+              public static void skin(DrawContext c, Assets.Tex t, int cx, int top, int s) {
+                  boolean modern = t.h() >= t.w();
+                  part(c, t, cx - 4 * s, top, 8, 8, 8, 8, s);
+                  part(c, t, cx - 4 * s, top + 8 * s, 20, 20, 8, 12, s);
+                  part(c, t, cx - 8 * s, top + 8 * s, 44, 20, 4, 12, s);
+                  part(c, t, cx + 4 * s, top + 8 * s, modern ? 36 : 44, modern ? 52 : 20, 4, 12, s);
+                  part(c, t, cx - 4 * s, top + 20 * s, 4, 20, 4, 12, s);
+                  part(c, t, cx, top + 20 * s, modern ? 20 : 4, modern ? 52 : 20, 4, 12, s);
+                  if (modern) {
+                      part(c, t, cx - 4 * s, top, 40, 8, 8, 8, s);
+                      part(c, t, cx - 4 * s, top + 8 * s, 20, 36, 8, 12, s);
+                      part(c, t, cx - 8 * s, top + 8 * s, 44, 36, 4, 12, s);
+                      part(c, t, cx + 4 * s, top + 8 * s, 52, 52, 4, 12, s);
+                      part(c, t, cx - 4 * s, top + 20 * s, 4, 36, 4, 12, s);
+                      part(c, t, cx, top + 20 * s, 4, 52, 4, 12, s);
+                  }
+              }
+              public static void cape(DrawContext c, Assets.Tex t, int x, int y, int s) {
+                  float f = t.w() / 64f;
+                  c.drawTexture(RenderPipelines.GUI_TEXTURED, t.id(), x, y, f, f, 10 * s, 16 * s,
+                          (int) (10 * f), (int) (16 * f), t.w(), t.h());
+              }
+          }
+          EOF
+
+      # ---------------------------------------------------------------
+      - name: Generate screens (menu, skin/cape/cosmetic, accounts)
+        run: |
+          D=src/main/java/com/charcoalui
+
+          cat > $D/MenuScreen.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.GameMenuScreen;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.screen.multiplayer.MultiplayerScreen;
+          import net.minecraft.client.gui.screen.option.OptionsScreen;
+          import net.minecraft.client.gui.screen.world.SelectWorldScreen;
+          import net.minecraft.text.Text;
+
+          public class MenuScreen extends Screen {
+              private final boolean pause;
+              public MenuScreen(boolean pause) { super(Text.literal("Charcoal UI")); this.pause = pause; }
+              @Override public boolean shouldPause() { return pause; }
+              @Override public boolean shouldCloseOnEsc() { return pause; }
+              @Override public void renderBackground(DrawContext c, int mx, int my, float d) {}
+
+              private int px = 16, pw = 150;
+
+              @Override protected void init() {
+                  String who = Accounts.current != null ? Accounts.current : client.getSession().getUsername();
+                  addDrawableChild(new RoyalButton(px + 8, 24, pw - 16, 20, who + " (v)", b -> client.setScreen(new AccountScreen(this))));
+                  addDrawableChild(new RoyalButton(px + 8, height - 44, pw - 16, 20, "Skin", b -> client.setScreen(new AssetScreen.Skin(this))));
+
+                  int bw = 200, bh = 24, gap = 6;
+                  int left = (width + pw) / 2 - bw / 2 - 40;
+                  int n = pause ? 3 : 4;
+                  int top = height / 2 - (n * (bh + gap)) / 2 + 14;
+                  String[] names = pause ? new String[]{"Kembali ke Game", "Options", "Simpan / Keluar..."}
+                                         : new String[]{"Singleplayer", "Multiplayer", "Options", "Keluar"};
+                  for (int i = 0; i < n; i++) {
+                      final int k = i;
+                      addDrawableChild(new RoyalButton(left, top + i * (bh + gap), bw, bh, names[i], b -> action(k)));
+                  }
+                  int cx = left + bw + 8;
+                  addDrawableChild(new RoyalButton(cx, top, 90, bh, "Cape", b -> client.setScreen(new AssetScreen.Cape(this))));
+                  addDrawableChild(new RoyalButton(cx, top + bh + gap, 90, bh, "Cosmetic", b -> client.setScreen(new AssetScreen.Cosmetic(this))));
+
+                  addDrawableChild(new RoyalButton(width - 40, 12, 24, 24, "", b -> client.setScreen(new GalleryScreen(this))).style(RoyalButton.GALLERY));
+                  addDrawableChild(new RoyalButton(width - 100, 12, 54, 24, "Music", b -> client.setScreen(new MusicScreen(this))));
+              }
+
+              private void action(int i) {
+                  if (pause) {
+                      if (i == 0) client.setScreen(null);
+                      else if (i == 1) client.setScreen(new OptionsScreen(this, client.options));
+                      else { CharcoalUI.allowVanilla = true; client.setScreen(new GameMenuScreen(true)); }
+                  } else {
+                      if (i == 0) client.setScreen(new SelectWorldScreen(this));
+                      else if (i == 1) client.setScreen(new MultiplayerScreen(this));
+                      else if (i == 2) client.setScreen(new OptionsScreen(this, client.options));
+                      else client.scheduleStop();
+                  }
+              }
+
+              @Override public void render(DrawContext c, int mx, int my, float d) {
+                  Theme.bg(c, width, height);
+                  Theme.panel(c, px, 16, pw, height - 32);
+                  int s = Math.max(2, Math.min(5, (height - 140) / 32));
+                  Preview.skin(c, Preview.currentSkin(), px + pw / 2, 54, s);
+                  int cx = (width + pw) / 2 - 40;
+                  Theme.center(c, "CHARCOAL UI", cx, Math.max(20, height / 2 - 90), Theme.TEXT);
+                  if (pause) Theme.center(c, "Game dijeda", cx, Math.max(32, height / 2 - 78), Theme.MUTED);
+                  super.render(c, mx, my, d);
+              }
+          }
+          EOF
+
+          cat > $D/AssetScreen.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.gl.RenderPipelines;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Util;
+          import java.nio.file.Path;
+          import java.util.*;
+
+          public abstract class AssetScreen extends Screen {
+              private final Screen parent;
+              private final String key, dir, title;
+              private final String[] ext;
+              private final boolean previewLeft;
+              protected Path selected;
+              private List<Path> files = new ArrayList<>();
+              private int scroll, px, py, pw, ph;
+
+              protected AssetScreen(Screen parent, String title, String key, String dir, boolean previewLeft, String... ext) {
+                  super(Text.literal(title));
+                  this.parent = parent; this.title = title; this.key = key; this.dir = dir;
+                  this.previewLeft = previewLeft; this.ext = ext;
+              }
+              protected abstract void drawPreview(DrawContext c, Path sel, int x, int y, int w, int h);
+              @Override public void renderBackground(DrawContext c, int mx, int my, float d) {}
+              @Override public void close() { client.setScreen(parent); }
+
+              @Override protected void init() {
+                  files = Assets.list(Assets.dir(dir), ext);
+                  if (selected == null) selected = Selection.path(key, dir);
+                  int m = 20, top = 44;
+                  pw = (width - 3 * m) / 2; ph = height - top - 56; py = top;
+                  px = previewLeft ? m : 2 * m + pw;
+                  int lx = previewLeft ? 2 * m + pw : m;
+                  int rows = Math.max(1, (ph - 8) / 22);
+                  scroll = Math.max(0, Math.min(scroll, Math.max(0, files.size() - rows)));
+                  for (int i = 0; i < rows && scroll + i < files.size(); i++) {
+                      final Path p = files.get(scroll + i);
+                      addDrawableChild(new RoyalButton(lx + 4, top + 4 + i * 22, pw - 8, 20, p.getFileName().toString(), b -> {
+                          selected = p; Selection.set(key, p.getFileName().toString()); clearAndInit();
+                      }).style(RoyalButton.ROW).left(true).select(p.equals(selected)));
+                  }
+                  int by = height - 34;
+                  addDrawableChild(new RoyalButton(m, by, 110, 22, "Buka Folder", b -> Util.getOperatingSystem().open(Assets.dir(dir).toFile())));
+                  addDrawableChild(new RoyalButton(m + 118, by, 90, 22, "Segarkan", b -> clearAndInit()));
+                  addDrawableChild(new RoyalButton(width - m - 90, by, 90, 22, "Kembali", b -> close()));
+              }
+
+              @Override public boolean mouseScrolled(double x, double y, double h, double v) {
+                  scroll -= (int) Math.signum(v); clearAndInit(); return true;
+              }
+
+              @Override public void render(DrawContext c, int mx, int my, float d) {
+                  Theme.bg(c, width, height);
+                  Theme.text(c, title, 20, 20, Theme.TEXT);
+                  Theme.text(c, files.size() + " file  |  folder: charcoalui/" + dir, 20 + textRenderer.getWidth(title) + 12, 20, Theme.MUTED);
+                  Theme.panel(c, px, py, pw, ph);
+                  int lx = previewLeft ? 2 * 20 + pw : 20;
+                  Theme.panel(c, lx, py, pw, ph);
+                  if (files.isEmpty()) Theme.center(c, "Folder kosong - taruh file di charcoalui/" + dir, lx + pw / 2, py + 20, Theme.MUTED);
+                  drawPreview(c, selected, px, py, pw, ph);
+                  super.render(c, mx, my, d);
+              }
+
+              // ---------------------------------------------------------
+              public static class Skin extends AssetScreen {
+                  public Skin(Screen p) { super(p, "Skin", "skin", "skins", true, ".png"); }
+                  @Override protected void drawPreview(DrawContext c, Path sel, int x, int y, int w, int h) {
+                      Assets.Tex t = sel == null ? null : Assets.texture(sel);
+                      if (t == null) t = Preview.steve();
+                      int s = Math.max(2, Math.min(6, (h - 20) / 32));
+                      Preview.skin(c, t, x + w / 2, y + 12, s);
+                      Theme.center(c, sel == null ? "(default)" : sel.getFileName().toString(), x + w / 2, y + h - 14, Theme.MUTED);
+                  }
+              }
+              public static class Cape extends AssetScreen {
+                  public Cape(Screen p) { super(p, "Cape", "cape", "capes", true, ".png"); }
+                  @Override protected void drawPreview(DrawContext c, Path sel, int x, int y, int w, int h) {
+                      Assets.Tex t = sel == null ? null : Assets.texture(sel);
+                      if (t == null) { Theme.center(c, "Belum ada cape dipilih", x + w / 2, y + h / 2, Theme.MUTED); return; }
+                      int s = Math.max(2, Math.min(8, (h - 30) / 16));
+                      Preview.cape(c, t, x + w / 2 - 5 * s, y + 12, s);
+                      Theme.center(c, sel.getFileName().toString(), x + w / 2, y + h - 14, Theme.MUTED);
+                  }
+              }
+              public static class Cosmetic extends AssetScreen {
+                  private Path cached; private BBModel model;
+                  public Cosmetic(Screen p) { super(p, "Cosmetic", "cosmetic", "cosmetics", false, ".bbmodel"); }
+                  @Override protected void drawPreview(DrawContext c, Path sel, int x, int y, int w, int h) {
+                      if (sel == null) { Theme.center(c, "Belum ada cosmetic dipilih", x + w / 2, y + h / 2, Theme.MUTED); return; }
+                      if (!sel.equals(cached)) { cached = sel; model = BBModel.load(sel); }
+                      if (model == null) { Theme.center(c, "File .bbmodel tidak valid", x + w / 2, y + h / 2, Theme.DANGER); return; }
+                      float s = Math.max(1.5f, (h - 40) / 40f);
+                      model.draw(c, x + w / 2, y + h - 24, s);
+                      Theme.center(c, model.name + " (" + model.cubes.size() + " kubus)", x + w / 2, y + h - 14, Theme.MUTED);
+                  }
+              }
+          }
+          EOF
+
+          cat > $D/AccountScreen.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+
+          public class AccountScreen extends Screen {
+              private final Screen parent;
+              private int scroll;
+              private String fieldText = "", msg = "";
+              private int lx, lw, rx, rw, top;
+
+              public AccountScreen(Screen parent) { super(Text.literal("Akun")); this.parent = parent; }
+              @Override public void renderBackground(DrawContext c, int mx, int my, float d) {}
+              @Override public void close() { client.setScreen(parent); }
+
+              @Override protected void init() {
+                  int m = 20; top = 44;
+                  lx = m; lw = width / 2 - m - 6; rx = width / 2 + 6; rw = width - rx - m;
+                  int rows = Math.max(1, (height - top - 60) / 22);
+                  scroll = Math.max(0, Math.min(scroll, Math.max(0, Accounts.NAMES.size() - rows)));
+                  for (int i = 0; i < rows && scroll + i < Accounts.NAMES.size(); i++) {
+                      final String n = Accounts.NAMES.get(scroll + i);
+                      addDrawableChild(new RoyalButton(lx + 4, top + 4 + i * 22, lw - 8, 20, n, b -> {
+                          Accounts.switchTo(n); msg = "Akun diganti ke " + n; clearAndInit();
+                      }).style(RoyalButton.ROW).left(true).select(n.equals(Accounts.current)));
+                  }
+                  TextFieldWidget f = new TextFieldWidget(textRenderer, rx + 8, top + 28, rw - 16, 20, Text.literal("username"));
+                  f.setMaxLength(16);
+                  f.setPlaceholder(Text.literal("username baru"));
+                  f.setText(fieldText);
+                  f.setChangedListener(s -> fieldText = s);
+                  addDrawableChild(f);
+                  addDrawableChild(new RoyalButton(rx + 8, top + 56, rw - 16, 22, "Add username", b -> {
+                      String e = Accounts.add(fieldText.trim()); msg = e == null ? "Ditambahkan" : e;
+                      if (e == null) fieldText = ""; clearAndInit();
+                  }));
+                  addDrawableChild(new RoyalButton(rx + 8, top + 84, rw - 16, 22, "Edit username (akun aktif)", b -> {
+                      String e = Accounts.current == null ? "Pilih akun dulu" : Accounts.rename(Accounts.current, fieldText.trim());
+                      msg = e == null ? "Username diubah" : e; if (e == null) fieldText = ""; clearAndInit();
+                  }));
+                  addDrawableChild(new RoyalButton(rx + 8, top + 112, rw - 16, 22, "Hapus username (akun aktif)", b -> {
+                      if (Accounts.current != null) { Accounts.remove(Accounts.current); msg = "Dihapus"; }
+                      clearAndInit();
+                  }).style(RoyalButton.DANGER));
+                  addDrawableChild(new RoyalButton(width - m - 90, height - 34, 90, 22, "Kembali", b -> close()));
+              }
+
+              @Override public boolean mouseScrolled(double x, double y, double h, double v) {
+                  scroll -= (int) Math.signum(v); clearAndInit(); return true;
+              }
+
+              @Override public void render(DrawContext c, int mx, int my, float d) {
+                  Theme.bg(c, width, height);
+                  Theme.text(c, "Akun Offline  (" + Accounts.NAMES.size() + "/" + Accounts.MAX + ")", 20, 20, Theme.TEXT);
+                  Theme.panel(c, lx, top, lw, height - top - 48);
+                  Theme.panel(c, rx, top, rw, height - top - 48);
+                  Theme.text(c, "Kelola akun", rx + 8, top + 10, Theme.MUTED);
+                  Theme.text(c, msg, rx + 8, top + 142, Theme.TEXT);
+                  super.render(c, mx, my, d);
+              }
+          }
+          EOF
+
+      # ---------------------------------------------------------------
+      - name: Generate gallery + music
+        run: |
+          D=src/main/java/com/charcoalui
+
+          cat > $D/GalleryScreen.java <<'EOF'
+          package com.charcoalui;
+          import net.fabricmc.loader.api.FabricLoader;
+          import net.minecraft.client.gl.RenderPipelines;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+          import javax.imageio.ImageIO;
+          import java.awt.*;
+          import java.awt.image.BufferedImage;
+          import java.io.File;
+          import java.nio.file.*;
+          import java.util.*;
+          import java.util.List;
+
+          public class GalleryScreen extends Screen {
+              private final Screen parent;
+              private List<Path> files = new ArrayList<>();
+              private int scroll, ci;
+              private Path sel;
+              private BufferedImage orig, cur;
+              private Assets.Tex prev;
+              private double sx = .4, sy = .4, sw = .2, sh = .15;
+              private String msg = "", txt = "";
+              private int ax, ay, aw, ah;
+              private static final int[] COLORS = {0xFFFFFF, 0xFF3B30, 0xFFD60A, 0x30D158, 0x4169E1, 0x000000};
+              private static final String[] CN = {"Putih", "Merah", "Kuning", "Hijau", "Biru", "Hitam"};
+
+              public GalleryScreen(Screen parent) { super(Text.literal("Gallery")); this.parent = parent; }
+              @Override public void renderBackground(DrawContext c, int mx, int my, float d) {}
+              @Override public void close() { client.setScreen(parent); }
+              @Override public void removed() { Assets.destroy(prev); prev = null; }
+
+              @Override protected void init() {
+                  Path dir = FabricLoader.getInstance().getGameDir().resolve("screenshots");
+                  files = Assets.list(dir, ".png");
+                  Collections.reverse(files);
+                  int lw = 170, top = 36;
+                  ax = 190; ay = top; aw = width - 200; ah = height - 106 - top;
+                  int rows = Math.max(1, (height - 34 - top - 8) / 22);
+                  scroll = Math.max(0, Math.min(scroll, Math.max(0, files.size() - rows)));
+                  for (int i = 0; i < rows && scroll + i < files.size(); i++) {
+                      final Path p = files.get(scroll + i);
+                      addDrawableChild(new RoyalButton(14, top + 4 + i * 22, lw - 8, 20, p.getFileName().toString(), b -> {
+                          load(p); clearAndInit();
+                      }).style(RoyalButton.ROW).left(true).select(p.equals(sel)));
+                  }
+                  int W2 = aw, y1 = height - 100, y2 = height - 76, y3 = height - 52, y4 = height - 28;
+                  String[] fn = {"Gray", "Sepia", "Invert", "Hangat", "Dingin", "Reset"};
+                  int bw = (W2 - 5 * 4) / 6;
+                  for (int i = 0; i < 6; i++) {
+                      final int k = i;
+                      addDrawableChild(new RoyalButton(ax + i * (bw + 4), y1, bw, 20, fn[i], b -> filter(k)));
+                  }
+                  int tw = Math.max(60, W2 - 212);
+                  TextFieldWidget tf = new TextFieldWidget(textRenderer, ax, y2, tw, 20, Text.literal("teks"));
+                  tf.setMaxLength(80); tf.setPlaceholder(Text.literal("isi teks")); tf.setText(txt);
+                  tf.setChangedListener(s -> txt = s);
+                  addDrawableChild(tf);
+                  addDrawableChild(new RoyalButton(ax + tw + 4, y2, 60, 20, "Teks", b -> addText()));
+                  addDrawableChild(new RoyalButton(ax + tw + 68, y2, 70, 20, CN[ci], b -> { ci = (ci + 1) % COLORS.length; clearAndInit(); }));
+                  addDrawableChild(new RoyalButton(ax + tw + 142, y2, 70, 20, "Sensor", b -> censor()));
+                  int sw4 = (W2 - 12) / 4;
+                  addDrawableChild(new RoyalSlider(ax, y3, sw4, 20, "X", sx, v -> sx = v));
+                  addDrawableChild(new RoyalSlider(ax + (sw4 + 4), y3, sw4, 20, "Y", sy, v -> sy = v));
+                  addDrawableChild(new RoyalSlider(ax + 2 * (sw4 + 4), y3, sw4, 20, "Lebar", sw, v -> sw = v));
+                  addDrawableChild(new RoyalSlider(ax + 3 * (sw4 + 4), y3, sw4, 20, "Tinggi", sh, v -> sh = v));
+                  addDrawableChild(new RoyalButton(14, y4, lw - 8, 20, "Kembali", b -> close()));
+                  addDrawableChild(new RoyalButton(ax, y4, 100, 20, "Simpan", b -> save()));
+                  addDrawableChild(new RoyalButton(ax + 104, y4, 80, 20, "Hapus", b -> delete()).style(RoyalButton.DANGER));
+              }
+
+              @Override public boolean mouseScrolled(double x, double y, double h, double v) {
+                  scroll -= (int) Math.signum(v); clearAndInit(); return true;
+              }
+
+              private void load(Path p) {
+                  try {
+                      sel = p; orig = ImageIO.read(p.toFile());
+                      cur = copy(orig); refresh(); msg = "";
+                  } catch (Exception e) { msg = "Gagal membuka gambar"; }
+              }
+              private static BufferedImage copy(BufferedImage s) {
+                  BufferedImage d = new BufferedImage(s.getWidth(), s.getHeight(), BufferedImage.TYPE_INT_ARGB);
+                  Graphics2D g = d.createGraphics(); g.drawImage(s, 0, 0, null); g.dispose(); return d;
+              }
+              private void refresh() {
+                  try { Assets.destroy(prev); prev = Assets.fromBuffered(cur); } catch (Exception e) { msg = "Gagal preview"; }
+              }
+              private void filter(int mode) {
+                  if (cur == null) return;
+                  if (mode == 5) { cur = copy(orig); refresh(); return; }
+                  for (int y = 0; y < cur.getHeight(); y++) for (int x = 0; x < cur.getWidth(); x++) {
+                      int p = cur.getRGB(x, y), a = p >>> 24, r = (p >> 16) & 255, g = (p >> 8) & 255, b = p & 255;
+                      switch (mode) {
+                          case 0 -> { int l = (int) (.299 * r + .587 * g + .114 * b); r = g = b = l; }
+                          case 1 -> { int nr = Math.min(255, (int) (.393 * r + .769 * g + .189 * b));
+                                      int ng = Math.min(255, (int) (.349 * r + .686 * g + .168 * b));
+                                      int nb = Math.min(255, (int) (.272 * r + .534 * g + .131 * b)); r = nr; g = ng; b = nb; }
+                          case 2 -> { r = 255 - r; g = 255 - g; b = 255 - b; }
+                          case 3 -> { r = Math.min(255, r + 25); b = Math.max(0, b - 25); }
+                          case 4 -> { b = Math.min(255, b + 25); r = Math.max(0, r - 25); }
+                      }
+                      cur.setRGB(x, y, (a << 24) | (r << 16) | (g << 8) | b);
+                  }
+                  refresh();
+              }
+              private void addText() {
+                  if (cur == null || txt.isBlank()) return;
+                  try {
+                      Graphics2D g = cur.createGraphics();
+                      g.setRenderingHint(RenderingHints.KEY_ANTIALIASING, RenderingHints.VALUE_ANTIALIAS_ON);
+                      g.setRenderingHint(RenderingHints.KEY_TEXT_ANTIALIASING, RenderingHints.VALUE_TEXT_ANTIALIAS_ON);
+                      int size = Math.max(12, (int) (sh * cur.getHeight()));
+                      g.setFont(new Font(Font.SANS_SERIF, Font.BOLD, size));
+                      int x = (int) (sx * cur.getWidth()), y = (int) (sy * cur.getHeight()) + size;
+                      g.setColor(new Color(0, 0, 0, 180)); g.drawString(txt, x + 2, y + 2);
+                      g.setColor(new Color(COLORS[ci])); g.drawString(txt, x, y);
+                      g.dispose(); refresh();
+                  } catch (Throwable t) { msg = "Font tidak tersedia di sistem ini"; }
+              }
+              private void censor() {
+                  if (cur == null) return;
+                  int W = cur.getWidth(), H = cur.getHeight();
+                  int x1 = (int) (sx * W), y1 = (int) (sy * H);
+                  int x2 = Math.min(W, x1 + Math.max(4, (int) (sw * W))), y2 = Math.min(H, y1 + Math.max(4, (int) (sh * H)));
+                  int blk = Math.max(8, Math.min(W, H) / 40);
+                  for (int by = y1; by < y2; by += blk) for (int bx = x1; bx < x2; bx += blk) {
+                      int ex = Math.min(x2, bx + blk), ey = Math.min(y2, by + blk);
+                      long a = 0, r = 0, g = 0, b = 0; int n = 0;
+                      for (int y = by; y < ey; y++) for (int x = bx; x < ex; x++) {
+                          int p = cur.getRGB(x, y); a += p >>> 24; r += (p >> 16) & 255; g += (p >> 8) & 255; b += p & 255; n++;
+                      }
+                      if (n == 0) continue;
+                      int col = ((int) (a / n) << 24) | ((int) (r / n) << 16) | ((int) (g / n) << 8) | (int) (b / n);
+                      for (int y = by; y < ey; y++) for (int x = bx; x < ex; x++) cur.setRGB(x, y, col);
+                  }
+                  refresh();
+              }
+              private void save() {
+                  if (cur == null || sel == null) return;
+                  try {
+                      String n = sel.getFileName().toString().replaceAll("\\.png$", "");
+                      File out = sel.getParent().resolve(n + "_edit" + (System.currentTimeMillis() % 100000) + ".png").toFile();
+                      ImageIO.write(cur, "png", out);
+                      msg = "Tersimpan: " + out.getName(); clearAndInit();
+                  } catch (Exception e) { msg = "Gagal menyimpan"; }
+              }
+              private void delete() {
+                  if (sel == null) return;
+                  try { Files.deleteIfExists(sel); } catch (Exception ignored) {}
+                  sel = null; cur = orig = null; Assets.destroy(prev); prev = null; msg = "Dihapus"; clearAndInit();
+              }
+
+              @Override public void render(DrawContext c, int mx, int my, float d) {
+                  Theme.bg(c, width, height);
+                  Theme.text(c, "Gallery  (" + files.size() + " screenshot, tekan F2 di game)", 14, 14, Theme.TEXT);
+                  Theme.panel(c, 10, 36, 170, height - 36 - 34);
+                  Theme.panel(c, ax, ay, aw, ah);
+                  if (files.isEmpty()) Theme.text(c, "Belum ada screenshot", 18, 46, Theme.MUTED);
+                  if (prev != null && cur != null) {
+                      float sc = Math.min((aw - 8f) / cur.getWidth(), (ah - 8f) / cur.getHeight());
+                      int dw = (int) (cur.getWidth() * sc), dh = (int) (cur.getHeight() * sc);
+                      int x = ax + (aw - dw) / 2, y = ay + (ah - dh) / 2;
+                      c.drawTexture(RenderPipelines.GUI_TEXTURED, prev.id(), x, y, 0f, 0f, dw, dh, prev.w(), prev.h(), prev.w(), prev.h());
+                      int rx = x + (int) (sx * dw), ry = y + (int) (sy * dh);
+                      int rw = Math.max(2, (int) (sw * dw)), rh = Math.max(2, (int) (sh * dh));
+                      int col = 0xFFFF3B30;
+                      c.fill(rx, ry, rx + rw, ry + 1, col); c.fill(rx, ry + rh, rx + rw, ry + rh + 1, col);
+                      c.fill(rx, ry, rx + 1, ry + rh, col); c.fill(rx + rw, ry, rx + rw + 1, ry + rh + 1, col);
+                  } else Theme.center(c, "Pilih screenshot di kiri", ax + aw / 2, ay + ah / 2, Theme.MUTED);
+                  Theme.text(c, msg, ax + 190, height - 22, Theme.TEXT);
+                  super.render(c, mx, my, d);
+              }
+          }
+          EOF
+
+          cat > $D/Track.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.texture.NativeImage;
+          import java.io.ByteArrayInputStream;
+          import java.nio.file.Path;
+          import java.util.concurrent.atomic.AtomicBoolean;
+          public final class Track {
+              public final Path path;
+              public volatile String title, artist = "";
+              public volatile long durMs = -1;
+              public volatile byte[] coverPng;
+              public volatile boolean loaded;
+              public final AtomicBoolean queued = new AtomicBoolean(false);
+              private Assets.Tex tex; private boolean texTried;
+              public Track(Path p) {
+                  path = p;
+                  String n = p.getFileName().toString().replaceAll("(?i)\\.mp3$", "");
+                  int i = n.indexOf(" - ");
+                  if (i > 0) { artist = n.substring(0, i).trim(); title = n.substring(i + 3).trim(); } else title = n;
+              }
+              /** Panggil hanya dari render thread. */
+              public Assets.Tex cover() {
+                  byte[] b = coverPng;
+                  if (tex == null && !texTried && b != null) {
+                      texTried = true;
+                      try { tex = Assets.register(NativeImage.read(new ByteArrayInputStream(b))); } catch (Exception ignored) {}
+                  }
+                  return tex;
+              }
+              public String dur() {
+                  if (durMs <= 0) return "--:--";
+                  long s = durMs / 1000;
+                  return (s / 60) + ":" + String.format("%02d", s % 60);
+              }
+          }
+          EOF
+
+          cat > $D/Id3.java <<'EOF'
+          package com.charcoalui;
+          import javazoom.jl.decoder.Bitstream;
+          import javazoom.jl.decoder.Header;
+          import javax.imageio.ImageIO;
+          import java.awt.Graphics2D;
+          import java.awt.RenderingHints;
+          import java.awt.image.BufferedImage;
+          import java.io.*;
+          import java.nio.charset.Charset;
+          import java.nio.charset.StandardCharsets;
+          import java.nio.file.Files;
+          import java.util.Arrays;
+
+          /** Pembaca tag ID3 (judul, artis, cover) + estimasi durasi. Jalan di background thread. */
+          public final class Id3 {
+              private static final Charset ISO = StandardCharsets.ISO_8859_1;
+              private static int u(byte b) { return b & 255; }
+              private static int synch(byte[] d, int o) { return (u(d[o]) << 21) | (u(d[o + 1]) << 14) | (u(d[o + 2]) << 7) | u(d[o + 3]); }
+              private static int plain(byte[] d, int o) { return (u(d[o]) << 24) | (u(d[o + 1]) << 16) | (u(d[o + 2]) << 8) | u(d[o + 3]); }
+
+              public static void read(Track t) {
+                  String title = null, artist = null; byte[] pic = null; long tagSize = 0;
+                  try (InputStream in = Files.newInputStream(t.path)) {
+                      byte[] h = in.readNBytes(10);
+                      if (h.length == 10 && h[0] == 'I' && h[1] == 'D' && h[2] == '3') {
+                          int ver = u(h[3]), flags = u(h[5]), size = synch(h, 6);
+                          tagSize = size + 10L;
+                          if (size > 0 && size <= 24_000_000) {
+                              byte[] d = in.readNBytes(size);
+                              String[] out = new String[2]; byte[][] pc = new byte[1][];
+                              parse(d, ver, flags, out, pc);
+                              title = out[0]; artist = out[1]; pic = pc[0];
+                          }
+                      }
+                  } catch (Exception ignored) {}
+                  if (title == null || title.isBlank()) {
+                      try (RandomAccessFile f = new RandomAccessFile(t.path.toFile(), "r")) {
+                          if (f.length() > 128) {
+                              f.seek(f.length() - 128);
+                              byte[] b = new byte[128]; f.readFully(b);
+                              if (b[0] == 'T' && b[1] == 'A' && b[2] == 'G') {
+                                  title = new String(b, 3, 30, ISO).replace('\0', ' ').trim();
+                                  if (artist == null || artist.isBlank()) artist = new String(b, 33, 30, ISO).replace('\0', ' ').trim();
+                              }
+                          }
+                      } catch (Exception ignored) {}
+                  }
+                  if (title != null && !title.isBlank()) t.title = title.trim();
+                  if (artist != null && !artist.isBlank()) t.artist = artist.trim();
+                  if (pic != null) t.coverPng = thumb(pic);
+                  try (InputStream in = new BufferedInputStream(Files.newInputStream(t.path))) {
+                      Bitstream bs = new Bitstream(in);
+                      Header hd = bs.readFrame();
+                      if (hd != null) {
+                          long size = Math.max(1, Math.min(Integer.MAX_VALUE, Files.size(t.path) - tagSize));
+                          float ms = hd.total_ms((int) size);
+                          if (ms > 0) t.durMs = (long) ms;
+                      }
+                  } catch (Throwable ignored) {}
+                  t.loaded = true;
+              }
+
+              private static void parse(byte[] d, int ver, int flags, String[] out, byte[][] pc) {
+                  int pos = 0;
+                  if (ver >= 3 && (flags & 0x40) != 0 && d.length >= 4) {
+                      int es = ver == 4 ? synch(d, 0) : plain(d, 0) + 4;
+                      pos = Math.max(0, Math.min(es, d.length));
+                  }
+                  int hl = ver == 2 ? 6 : 10;
+                  while (pos + hl <= d.length) {
+                      String id; int size;
+                      if (ver == 2) { id = new String(d, pos, 3, ISO); size = (u(d[pos + 3]) << 16) | (u(d[pos + 4]) << 8) | u(d[pos + 5]); }
+                      else { id = new String(d, pos, 4, ISO); size = ver == 4 ? synch(d, pos + 4) : plain(d, pos + 4); }
+                      if (id.charAt(0) == 0 || size <= 0) break;
+                      int start = pos + hl;
+                      if (start + size > d.length) break;
+                      if (id.equals("TIT2") || id.equals("TT2")) out[0] = text(d, start, size);
+                      else if (id.equals("TPE1") || id.equals("TP1")) out[1] = text(d, start, size);
+                      else if ((id.equals("APIC") || id.equals("PIC")) && pc[0] == null) pc[0] = apic(d, start, size, ver == 2);
+                      pos = start + size;
+                  }
+              }
+              private static String text(byte[] d, int off, int len) {
+                  if (len < 2) return null;
+                  int enc = u(d[off]);
+                  Charset cs = enc == 0 ? ISO : enc == 1 ? StandardCharsets.UTF_16 : enc == 2 ? StandardCharsets.UTF_16BE : StandardCharsets.UTF_8;
+                  String s = new String(d, off + 1, len - 1, cs);
+                  int z = s.indexOf('\0'); if (z >= 0) s = s.substring(0, z);
+                  return s.trim();
+              }
+              private static byte[] apic(byte[] d, int off, int len, boolean v22) {
+                  int end = off + len, enc = u(d[off]), p = off + 1;
+                  if (v22) p += 3; else { while (p < end && d[p] != 0) p++; p++; }
+                  p++; // picture type
+                  if (enc == 1 || enc == 2) { while (p + 1 < end && !(d[p] == 0 && d[p + 1] == 0)) p += 2; p += 2; }
+                  else { while (p < end && d[p] != 0) p++; p++; }
+                  if (p >= end) return null;
+                  return Arrays.copyOfRange(d, p, end);
+              }
+              private static byte[] thumb(byte[] img) {
+                  try {
+                      BufferedImage b = ImageIO.read(new ByteArrayInputStream(img));
+                      if (b == null) return null;
+                      double sc = Math.min(1.0, 160.0 / Math.max(b.getWidth(), b.getHeight()));
+                      int w = Math.max(1, (int) (b.getWidth() * sc)), h = Math.max(1, (int) (b.getHeight() * sc));
+                      BufferedImage o = new BufferedImage(w, h, BufferedImage.TYPE_INT_ARGB);
+                      Graphics2D g = o.createGraphics();
+                      g.setRenderingHint(RenderingHints.KEY_INTERPOLATION, RenderingHints.VALUE_INTERPOLATION_BILINEAR);
+                      g.drawImage(b, 0, 0, w, h, null); g.dispose();
+                      ByteArrayOutputStream bo = new ByteArrayOutputStream();
+                      ImageIO.write(o, "png", bo);
+                      return bo.toByteArray();
+                  } catch (Throwable e) { return null; }
+              }
+          }
+          EOF
+
+          cat > $D/TrackRow.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.MinecraftClient;
+          import net.minecraft.client.font.TextRenderer;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.widget.ButtonWidget;
+          import net.minecraft.text.Text;
+          public class TrackRow extends ButtonWidget {
+              private final Track t; private final int num; private final boolean cur, grid;
+              public TrackRow(int x, int y, int w, int h, Track t, int num, boolean cur, boolean grid, PressAction a) {
+                  super(x, y, w, h, Text.literal(t.title), a, DEFAULT_NARRATION_SUPPLIER);
+                  this.t = t; this.num = num; this.cur = cur; this.grid = grid;
+              }
+              @Override public void renderWidget(DrawContext c, int mx, int my, float d) {
+                  TextRenderer tr = MinecraftClient.getInstance().textRenderer;
+                  int x = getX(), y = getY(), w = getWidth(), h = getHeight();
+                  boolean hv = isHovered();
+                  if (cur || hv) Theme.round(c, x, y, w, h, cur ? 0xFF3A4A7A : 0xFF404046);
+                  if (grid) {
+                      int cs = w - 12;
+                      MusicScreen.cover(c, t, x + 6, y + 6, cs);
+                      String s = tr.trimToWidth(t.title, w - 6);
+                      c.drawText(tr, s, x + (w - tr.getWidth(s)) / 2, y + cs + 10, cur ? 0xFF8FA8FF : Theme.TEXT, false);
+                      return;
+                  }
+                  c.drawText(tr, cur ? ">" : String.valueOf(num), x + 8, y + (h - 8) / 2, cur ? 0xFF8FA8FF : Theme.MUTED, false);
+                  int cs = h - 6, tx = x + 28 + cs + 8;
+                  MusicScreen.cover(c, t, x + 28, y + 3, cs);
+                  String dur = t.dur();
+                  int dw = tr.getWidth(dur), avail = Math.max(20, w - (tx - x) - dw - 16);
+                  c.drawText(tr, tr.trimToWidth(t.title, avail), tx, y + 4, cur ? 0xFFFFFFFF : Theme.TEXT, false);
+                  String ar = t.artist.isEmpty() ? "Unknown artist" : t.artist;
+                  c.drawText(tr, tr.trimToWidth(ar, avail), tx, y + 14, Theme.MUTED, false);
+                  c.drawText(tr, dur, x + w - dw - 8, y + (h - 8) / 2, Theme.MUTED, false);
+              }
+          }
+          EOF
+
+          cat > $D/MusicPlayer.java <<'EOF'
+          package com.charcoalui;
+          import javazoom.jl.decoder.*;
+          import javax.sound.sampled.*;
+          import java.io.*;
+          import java.nio.file.*;
+          import java.util.*;
+          import java.util.concurrent.*;
+          import java.util.stream.Stream;
+
+          public final class MusicPlayer {
+              public static final MusicPlayer I = new MusicPlayer();
+              public volatile List<Track> all = new ArrayList<>();
+              public volatile Map<String, List<Track>> playlists = new LinkedHashMap<>();
+              public volatile List<Track> queue = new ArrayList<>();
+              public volatile int qi = -1;
+              public volatile Track current;
+              public volatile float volume = 0.7f;
+              public volatile boolean paused = false, shuffle = false;
+              public volatile double playedMs = 0, totalMs = 0;
+              private volatile int gen = 0;
+              private final Random rnd = new Random();
+              private final Map<Path, Track> cache = new HashMap<>();
+              private final ExecutorService loader = Executors.newSingleThreadExecutor(r -> {
+                  Thread t = new Thread(r, "charcoalui-meta"); t.setDaemon(true); return t;
+              });
+
+              private Track track(Path p) { return cache.computeIfAbsent(p, Track::new); }
+
+              /** Root folder = Semua Lagu; tiap subfolder = playlist. */
+              public void scan() {
+                  Path root = Assets.dir("music");
+                  List<Track> a = new ArrayList<>();
+                  Map<String, List<Track>> pl = new LinkedHashMap<>();
+                  for (Path p : Assets.list(root, ".mp3")) a.add(track(p));
+                  try (Stream<Path> s = Files.list(root)) {
+                      for (Path d : s.filter(Files::isDirectory).sorted().toList()) {
+                          List<Track> l = new ArrayList<>();
+                          for (Path p : Assets.list(d, ".mp3")) l.add(track(p));
+                          if (!l.isEmpty()) { pl.put(d.getFileName().toString(), l); a.addAll(l); }
+                      }
+                  } catch (IOException ignored) {}
+                  all = a; playlists = pl;
+                  for (Track t : a) if (t.queued.compareAndSet(false, true)) loader.submit(() -> Id3.read(t));
+              }
+
+              public void play(List<Track> list, int i) {
+                  queue = new ArrayList<>(list); start(i);
+              }
+              private void start(int i) {
+                  List<Track> q = queue;
+                  if (i < 0 || i >= q.size()) return;
+                  final int g = ++gen;
+                  qi = i; current = q.get(i); paused = false; playedMs = 0;
+                  totalMs = Math.max(0, current.durMs);
+                  final Track t = current;
+                  Thread th = new Thread(() -> run(t, g), "charcoalui-music");
+                  th.setDaemon(true); th.start();
+              }
+              public void toggle() {
+                  if (current == null) { if (!all.isEmpty()) play(all, 0); }
+                  else paused = !paused;
+              }
+              public void next() {
+                  int n = queue.size(); if (n == 0) return;
+                  start(shuffle ? rnd.nextInt(n) : (qi + 1) % n);
+              }
+              public void prev() {
+                  int n = queue.size(); if (n == 0) return;
+                  start(playedMs > 3000 ? Math.max(qi, 0) : (qi - 1 + n) % n);
+              }
+
+              private void run(Track t, int g) {
+                  try (InputStream in = new BufferedInputStream(Files.newInputStream(t.path))) {
+                      if (t.durMs <= 0) {
+                          double tot = 0;
+                          try (InputStream in2 = new BufferedInputStream(Files.newInputStream(t.path))) {
+                              Bitstream b2 = new Bitstream(in2); Header h;
+                              while ((h = b2.readFrame()) != null) { tot += h.ms_per_frame(); b2.closeFrame(); }
+                          } catch (Exception ignored) {}
+                          t.durMs = (long) tot;
+                      }
+                      if (g == gen) totalMs = t.durMs;
+                      Bitstream bs = new Bitstream(in);
+                      Decoder dec = new Decoder();
+                      SourceDataLine line = null;
+                      boolean natural = false;
+                      try {
+                          while (g == gen) {
+                              if (paused) { Thread.sleep(50); continue; }
+                              Header h = bs.readFrame();
+                              if (h == null) { natural = true; break; }
+                              SampleBuffer buf = (SampleBuffer) dec.decodeFrame(h, bs);
+                              if (line == null) {
+                                  AudioFormat f = new AudioFormat(dec.getOutputFrequency(), 16, dec.getOutputChannels(), true, false);
+                                  line = AudioSystem.getSourceDataLine(f); line.open(f); line.start();
+                              }
+                              short[] s = buf.getBuffer(); int n = buf.getBufferLength();
+                              byte[] out = new byte[n * 2]; float v = volume * volume;
+                              for (int i = 0; i < n; i++) {
+                                  int val = (int) (s[i] * v);
+                                  out[2 * i] = (byte) val; out[2 * i + 1] = (byte) (val >> 8);
+                              }
+                              line.write(out, 0, out.length);
+                              playedMs += h.ms_per_frame();
+                              bs.closeFrame();
+                          }
+                      } finally {
+                          if (line != null) { if (natural) line.drain(); else line.flush(); line.stop(); line.close(); }
+                      }
+                      if (natural && g == gen) next();
+                  } catch (Throwable e) { if (g == gen) paused = true; }
+              }
+          }
+          EOF
+
+          cat > $D/MusicScreen.java <<'EOF'
+          package com.charcoalui;
+          import net.minecraft.client.gl.RenderPipelines;
+          import net.minecraft.client.gui.DrawContext;
+          import net.minecraft.client.gui.screen.Screen;
+          import net.minecraft.client.gui.widget.ClickableWidget;
+          import net.minecraft.client.gui.widget.TextFieldWidget;
+          import net.minecraft.text.Text;
+          import net.minecraft.util.Util;
+          import java.util.*;
+
+          public class MusicScreen extends Screen {
+              private final Screen parent;
+              private static String view = null;      // null = Semua Lagu
+              private static boolean covers = false;  // false = List, true = Covers
+              private String filter = "", search = "";
+              private int scroll, sw, mx0, mw, barY, rowsVisible = 1, cols = 1;
+              private Track lastCur;
+              private List<Track> shown = new ArrayList<>();
+              private final List<ClickableWidget> rowWidgets = new ArrayList<>();
+              private RoyalButton playBtn, shuffleBtn;
+
+              public MusicScreen(Screen parent) { super(Text.literal("Music")); this.parent = parent; MusicPlayer.I.scan(); }
+              @Override public void renderBackground(DrawContext c, int mx, int my, float d) {}
+              @Override public void close() { client.setScreen(parent); }
+
+              public static void cover(DrawContext c, Track t, int x, int y, int size) {
+                  Assets.Tex tx = t == null ? null : t.cover();
+                  if (tx != null) {
+                      c.drawTexture(RenderPipelines.GUI_TEXTURED, tx.id(), x, y, 0f, 0f, size, size, tx.w(), tx.h(), tx.w(), tx.h());
+                      return;
+                  }
+                  Theme.round(c, x, y, size, size, 0xFF45454C);
+                  if (t != null && size >= 16) {
+                      String s = t.title.isEmpty() ? "?" : t.title.substring(0, 1).toUpperCase();
+                      Theme.center(c, s, x + size / 2, y + size / 2 - 4, Theme.MUTED);
+                  }
+              }
+
+              private List<Track> visible() {
+                  MusicPlayer mp = MusicPlayer.I;
+                  boolean s = !search.isBlank();
+                  List<Track> base = (s || view == null) ? mp.all : mp.playlists.getOrDefault(view, new ArrayList<>());
+                  String q = (s ? search : filter).trim().toLowerCase();
+                  if (q.isEmpty()) return base;
+                  List<Track> out = new ArrayList<>();
+                  for (Track t : base)
+                      if (t.title.toLowerCase().contains(q) || t.artist.toLowerCase().contains(q)
+                              || t.path.getFileName().toString().toLowerCase().contains(q)) out.add(t);
+                  return out;
+              }
+              private String viewTitle() { return !search.isBlank() ? "Hasil: " + search : (view == null ? "Semua Lagu" : view); }
+              private String playLabel() { MusicPlayer mp = MusicPlayer.I; return (mp.current != null && !mp.paused) ? "||" : ">"; }
+              private String shuffleLabel() { return MusicPlayer.I.shuffle ? "Shuffle: ON" : "Shuffle"; }
+
+              private void locate() {
+                  Track cur = MusicPlayer.I.current;
+                  if (cur == null) return;
+                  search = ""; filter = "";
+                  if (!visible().contains(cur)) view = null;
+                  int i = visible().indexOf(cur);
+                  if (i >= 0) scroll = Math.max(0, i / (covers ? cols : 1) - rowsVisible / 2);
+                  clearAndInit();
+              }
+              private void pick(String v) { view = v; search = ""; filter = ""; scroll = 0; clearAndInit(); }
+
+              @Override protected void init() {
+                  MusicPlayer mp = MusicPlayer.I;
+                  rowWidgets.clear();
+                  sw = Math.max(110, Math.min(150, width / 4));
+                  mx0 = sw + 20; mw = width - mx0 - 10; barY = height - 64;
+                  int sx = 18, sbw = sw - 16;
+
+                  searchField = new TextFieldWidget(textRenderer, sx, 16, sbw, 18, Text.literal("search"));
+                  searchField.setPlaceholder(Text.literal("Search songs..."));
+                  searchField.setMaxLength(40); searchField.setText(search);
+                  searchField.setChangedListener(s -> { search = s; scroll = 0; rebuildRows(); });
+                  addDrawableChild(searchField);
+
+                  addDrawableChild(new RoyalButton(sx, 54, sbw, 18, "Home", b -> pick(null))
+                          .style(RoyalButton.ROW).left(true).select(view == null && search.isBlank()));
+                  addDrawableChild(new RoyalButton(sx, 90, sbw, 18, "Now Playing", b -> locate())
+                          .style(RoyalButton.ROW).left(true));
+                  int py = 126;
+                  for (String name : mp.playlists.keySet()) {
+                      if (py > height - 112) break;
+                      addDrawableChild(new RoyalButton(sx, py, sbw, 18, name, b -> pick(name))
+                              .style(RoyalButton.ROW).left(true).select(name.equals(view) && search.isBlank()));
+                      py += 20;
+                  }
+                  addDrawableChild(new RoyalButton(sx, height - 84, sbw, 20, "Buka Folder", b -> Util.getOperatingSystem().open(Assets.dir("music").toFile())));
+                  addDrawableChild(new RoyalButton(sx, height - 60, sbw, 20, "Segarkan", b -> { mp.scan(); clearAndInit(); }));
+                  addDrawableChild(new RoyalButton(sx, height - 36, sbw, 20, "Kembali", b -> close()));
+
+                  // header
+                  addDrawableChild(new RoyalButton(mx0 + 72, 50, 70, 18, "Play all", b -> {
+                      List<Track> v = visible(); if (!v.isEmpty()) mp.play(v, 0);
+                  }));
+                  int rx = mx0 + mw - 10;
+                  addDrawableChild(new RoyalButton(rx - 52, 16, 52, 18, "Covers", b -> { covers = true; scroll = 0; clearAndInit(); })
+                          .style(covers ? RoyalButton.ROYAL : RoyalButton.ROW));
+                  addDrawableChild(new RoyalButton(rx - 100, 16, 46, 18, "List", b -> { covers = false; scroll = 0; clearAndInit(); })
+                          .style(covers ? RoyalButton.ROW : RoyalButton.ROYAL));
+                  addDrawableChild(new RoyalButton(rx - 160, 16, 56, 18, "Locate", b -> locate()));
+                  filterField = new TextFieldWidget(textRenderer, rx - 160 - 4 - 110, 16, 110, 18, Text.literal("filter"));
+                  filterField.setPlaceholder(Text.literal("Filter this list..."));
+                  filterField.setMaxLength(40); filterField.setText(filter);
+                  filterField.setChangedListener(s -> { filter = s; scroll = 0; rebuildRows(); });
+                  addDrawableChild(filterField);
+
+                  // player bar
+                  int cx = mx0 + mw / 2, by = barY + 6;
+                  addDrawableChild(new RoyalButton(cx - 62, by, 30, 22, "<<", b -> mp.prev()));
+                  playBtn = addDrawableChild(new RoyalButton(cx - 26, by, 52, 22, playLabel(), b -> { mp.toggle(); playBtn.setMessage(Text.literal(playLabel())); }));
+                  addDrawableChild(new RoyalButton(cx + 32, by, 30, 22, ">>", b -> mp.next()));
+                  shuffleBtn = addDrawableChild(new RoyalButton(mx0 + mw - 104, by, 94, 20, shuffleLabel(), b -> {
+                      mp.shuffle = !mp.shuffle;
+                      shuffleBtn.setMessage(Text.literal(shuffleLabel()));
+                      shuffleBtn.style(mp.shuffle ? RoyalButton.ROYAL : RoyalButton.ROW);
+                  }).style(mp.shuffle ? RoyalButton.ROYAL : RoyalButton.ROW));
+                  addDrawableChild(new RoyalSlider(mx0 + mw - 104, by + 26, 94, 14, "Vol", mp.volume, v -> mp.volume = (float) v));
+
+                  rebuildRows();
+              }
+              private TextFieldWidget searchField, filterField;
+
+              private void rebuildRows() {
+                  for (ClickableWidget w : rowWidgets) remove(w);
+                  rowWidgets.clear();
+                  MusicPlayer mp = MusicPlayer.I;
+                  final List<Track> v = visible();
+                  shown = v;
+                  int top = 98, bottom = barY - 8, avail = bottom - top;
+                  if (covers) {
+                      int cw = 84, ch = 94;
+                      cols = Math.max(1, (mw - 16) / cw);
+                      rowsVisible = Math.max(1, avail / ch);
+                      int totalRows = (v.size() + cols - 1) / cols;
+                      scroll = Math.max(0, Math.min(scroll, Math.max(0, totalRows - rowsVisible)));
+                      int ox = mx0 + 8 + Math.max(0, (mw - 16 - cols * cw) / 2);
+                      for (int r = 0; r < rowsVisible; r++) for (int cI = 0; cI < cols; cI++) {
+                          final int idx = (scroll + r) * cols + cI;
+                          if (idx >= v.size()) break;
+                          Track t = v.get(idx);
+                          rowWidgets.add(new TrackRow(ox + cI * cw, top + r * ch, cw - 2, ch - 2, t, idx + 1, t == mp.current, true, b -> mp.play(v, idx)));
+                      }
+                  } else {
+                      int rh = 28;
+                      rowsVisible = Math.max(1, avail / rh);
+                      scroll = Math.max(0, Math.min(scroll, Math.max(0, v.size() - rowsVisible)));
+                      for (int i = 0; i < rowsVisible && scroll + i < v.size(); i++) {
+                          final int idx = scroll + i;
+                          Track t = v.get(idx);
+                          rowWidgets.add(new TrackRow(mx0 + 6, top + i * rh, mw - 18, rh - 2, t, idx + 1, t == mp.current, false, b -> mp.play(v, idx)));
+                      }
+                  }
+                  for (ClickableWidget w : rowWidgets) addDrawableChild(w);
+                  lastCur = mp.current;
+              }
+
+              @Override public void tick() {
+                  if (MusicPlayer.I.current != lastCur) rebuildRows();
+                  if (playBtn != null) playBtn.setMessage(Text.literal(playLabel()));
+              }
+              @Override public boolean mouseScrolled(double x, double y, double h, double v) {
+                  scroll -= (int) Math.signum(v); rebuildRows(); return true;
+              }
+              private static String fmt(double ms) { int s = (int) (ms / 1000); return (s / 60) + ":" + String.format("%02d", s % 60); }
+
+              @Override public void render(DrawContext c, int mx, int my, float d) {
+                  MusicPlayer mp = MusicPlayer.I;
+                  Theme.bg(c, width, height);
+                  // sidebar
+                  Theme.panel(c, 10, 10, sw, height - 20);
+                  Theme.text(c, "CHARCOAL MUSIC", 18, 42, Theme.MUTED);
+                  Theme.text(c, "DISCOVER", 18, 78, Theme.MUTED);
+                  Theme.text(c, "MY PLAYLISTS", 18, 114, Theme.MUTED);
+                  // main
+                  Theme.panel(c, mx0, 10, mw, barY - 18);
+                  Track ht = shown.isEmpty() ? null : shown.get(0);
+                  for (int i = 0; i < Math.min(30, shown.size()); i++) if (shown.get(i).coverPng != null) { ht = shown.get(i); break; }
+                  cover(c, ht, mx0 + 10, 16, 52);
+                  Theme.text(c, viewTitle(), mx0 + 72, 20, Theme.TEXT);
+                  Theme.text(c, shown.size() + " lagu", mx0 + 72, 34, Theme.MUTED);
+                  Theme.text(c, "#", mx0 + 12, 86, Theme.MUTED);
+                  if (!covers) Theme.text(c, "TITLE", mx0 + 36, 86, Theme.MUTED);
+                  Theme.text(c, "TIME", mx0 + mw - 44, 86, Theme.MUTED);
+                  c.fill(mx0 + 8, 96, mx0 + mw - 8, 97, 0xFF45454A);
+                  if (mp.all.isEmpty()) Theme.text(c, "Taruh .mp3 di charcoalui/music (subfolder = playlist), lalu Segarkan", mx0 + 12, 106, Theme.MUTED);
+                  int total = covers ? (shown.size() + cols - 1) / cols : shown.size();
+                  if (total > rowsVisible) {
+                      int trackH = barY - 8 - 98, thumbH = Math.max(12, trackH * rowsVisible / total);
+                      int thumbY = 98 + (trackH - thumbH) * scroll / Math.max(1, total - rowsVisible);
+                      c.fill(mx0 + mw - 7, thumbY, mx0 + mw - 4, thumbY + thumbH, 0xFF6B6B72);
+                  }
+                  // player bar
+                  Theme.panel(c, mx0, barY, mw, 56);
+                  Track cur = mp.current;
+                  cover(c, cur, mx0 + 8, barY + 8, 40);
+                  int cx = mx0 + mw / 2, textW = Math.max(30, cx - 72 - (mx0 + 54));
+                  Theme.text(c, textRenderer.trimToWidth(cur == null ? "Tidak ada lagu" : cur.title, textW), mx0 + 54, barY + 12, Theme.TEXT);
+                  Theme.text(c, textRenderer.trimToWidth(cur == null ? "" : cur.artist, textW), mx0 + 54, barY + 24, Theme.MUTED);
+                  int bx = mx0 + 54, bw = mw - 54 - 116, byy = barY + 40;
+                  c.fill(bx, byy, bx + bw, byy + 3, 0xFF1F1F22);
+                  double frac = mp.totalMs > 0 ? Math.min(1, mp.playedMs / mp.totalMs) : 0;
+                  c.fill(bx, byy, bx + (int) (bw * frac), byy + 3, Theme.BLUE);
+                  Theme.text(c, fmt(mp.playedMs), bx, byy + 6, Theme.MUTED);
+                  String tot = fmt(mp.totalMs);
+                  Theme.text(c, tot, bx + bw - textRenderer.getWidth(tot), byy + 6, Theme.MUTED);
+                  super.render(c, mx, my, d);
+              }
+          }
+          EOF
+
+      # ---------------------------------------------------------------
+      - name: Build
+        run: gradle build --no-daemon --stacktrace
+
+      - name: Upload mod jar
+        uses: actions/upload-artifact@v4
+        with:
+          name: charcoalui-mod
+          path: |
+            build/libs/charcoalui-*.jar
+            !build/libs/*-sources.jar
